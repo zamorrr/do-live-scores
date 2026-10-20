@@ -2,8 +2,8 @@
 // ==UserScript==
 // @name         Dugout Live Scores
 // @namespace    dugout-live-scores
-// @version      0.4.7
-// @description  Live scores for league and cup, mobile support
+// @version      0.4.8
+// @description  Live scores for Dugout Online competitions
 // @match        https://dugout-online.com/game/*
 // @match        https://www.dugout-online.com/game/*
 // @match        https://dugout-online.com/competitions/*
@@ -83,22 +83,30 @@
   }
 
   // ==========================================
-  // MATCH CLOCK - DESKTOP AND MOBILE
+  // MATCH CLOCK
   // ==========================================
 
   function parseClock(value) {
     const text = clean(value);
 
-    // 67:25, [67:25], 67', 67 min
+    // Supported:
+    // 67:25
+    // [67:25]
+    // 67'
+    // 67 min
     const match = text.match(
-      /^(?:\[)?(\d{1,3})(?::([0-5]\d)|['’′]|(?:\s*min(?:ute)?s?))\]?$/
+      /^\[?(\d{1,3})(?::([0-5]\d)|['’′]|\s*min(?:ute)?s?)\]?$/
     );
 
     if (!match) return null;
 
     const minute = Number(match[1]);
 
-    if (!Number.isInteger(minute) || minute > 130) {
+    if (
+      !Number.isInteger(minute) ||
+      minute < 0 ||
+      minute > 130
+    ) {
       return null;
     }
 
@@ -106,12 +114,9 @@
   }
 
   function readMatchMinute(lines, scoreIndex, status) {
-    if (status !== 'LIVE') {
-      return { minute: null, approximate: false };
-    }
+    if (status !== 'LIVE') return null;
 
-    // 1. Search for the match clock in the
-    // visible match header and event area.
+    // 1. Prefer the visible match clock.
     const end = Math.min(
       lines.length,
       scoreIndex + 180
@@ -124,17 +129,15 @@
         break;
       }
 
-      // Avoid timestamps in player substitutions.
       const minute = parseClock(line);
 
-      if (minute !== null && line.includes(':')) {
-        return { minute, approximate: false };
+      if (minute !== null) {
+        return minute;
       }
     }
 
-    // 2. Mobile fallback: latest commentary entry.
-    // This is the minute of the last event,
-    // not necessarily the exact current clock.
+    // 2. Fallback: newest commentary entry.
+    // Dugout displays commentary newest first.
     const text = document.body.innerText;
     const commentaryAt = text.search(
       /Match commentary/i
@@ -143,7 +146,7 @@
     if (commentaryAt >= 0) {
       const commentary = text.slice(
         commentaryAt,
-        commentaryAt + 2500
+        commentaryAt + 4000
       );
 
       const event = commentary.match(
@@ -153,13 +156,13 @@
       if (event) {
         const minute = Number(event[1]);
 
-        if (minute <= 130) {
-          return { minute, approximate: true };
+        if (minute >= 0 && minute <= 130) {
+          return minute;
         }
       }
     }
 
-    return { minute: null, approximate: false };
+    return null;
   }
 
   // ==========================================
@@ -234,12 +237,6 @@
 
       if (!away) continue;
 
-      const clock = readMatchMinute(
-        lines,
-        i,
-        status
-      );
-
       return {
         gameId: id,
         home: lines[i - 2],
@@ -247,8 +244,7 @@
         homeScore: Number(score[1]),
         awayScore: Number(score[2]),
         status,
-        minute: clock.minute,
-        minuteApproximate: clock.approximate,
+        minute: readMatchMinute(lines, i, status),
         aet,
         pens,
         url: location.href
@@ -475,7 +471,7 @@
         transform: translateX(-50%);
       }
 
-      /* MOBILE GOAL INDICATOR */
+      /* MOBILE GOAL ICON */
 
       .dls-mobile-goal {
         display: none;
@@ -485,7 +481,7 @@
         vertical-align: baseline;
       }
 
-      /* PULSING DIGIT */
+      /* PULSING GOAL DIGIT */
 
       @keyframes dls-digit-pulse {
         0%, 100% {
@@ -517,7 +513,6 @@
       /* MOBILE LAYOUT */
 
       @media (max-width: 768px) {
-        /* No floating goal overlay on mobile */
         .dls-goal-marker {
           display: none !important;
         }
@@ -537,10 +532,9 @@
         }
 
         .dls-digit {
-          min-width: 0.65em;
+          min-width: .65em;
         }
 
-        /* Preserve normal fixture spacing */
         a.do-fixture-vs.dls-live-score,
         a.do-fixture-score.dls-live-score {
           min-width: 0 !important;
@@ -818,13 +812,10 @@
       if (game.status === 'LIVE') {
         statusClass += ' dls-status-live';
 
+        // Current minute or latest commentary minute.
+        // Both display identically, without "~".
         if (Number.isInteger(game.minute)) {
-          const prefix = game.minuteApproximate
-            ? '~'
-            : '';
-
-          statusText =
-            `LIVE · ${prefix}${game.minute}'`;
+          statusText = `LIVE · ${game.minute}'`;
         }
       } else if (game.status === 'HT') {
         statusClass += ' dls-status-ht';
@@ -836,8 +827,6 @@
         statusText
       );
 
-      // On mobile show a small goal icon inline
-      // with the match status, not as an overlay.
       if (goalSide) {
         const mobileGoal = document.createElement('span');
 
@@ -897,10 +886,7 @@
         const id = String(game.gameId);
         const previous = matches.get(id);
 
-        if (
-          !previous ||
-          updated > previous.updated
-        ) {
+        if (!previous || updated > previous.updated) {
           matches.set(id, { game, updated });
         }
       }
@@ -1035,7 +1021,7 @@
     setInterval(refresh, REFRESH_MS);
 
     console.info(
-      '[Dugout Live Scores] v0.4.7 active',
+      '[Dugout Live Scores] v0.4.8 active',
       location.pathname
     );
   }
