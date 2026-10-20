@@ -1,8 +1,9 @@
+
 // ==UserScript==
 // @name         Dugout Live Scores
 // @namespace    dugout-live-scores
-// @version      0.4.6
-// @description  Live scores on Dugout competition pages
+// @version      0.4.7
+// @description  Live scores for league and cup, mobile support
 // @match        https://dugout-online.com/game/*
 // @match        https://www.dugout-online.com/game/*
 // @match        https://dugout-online.com/competitions/*
@@ -23,52 +24,151 @@
   const REFRESH_MS = 2000;
   const HEARTBEAT_MS = 5000;
 
-  const isGame = /\/game\/.*gameid\/\d+/.test(location.pathname);
-  const isCompetition = /^\/competitions\/none(?:\/|$)/.test(location.pathname);
+  const isGame =
+    /\/game\/.*gameid\/\d+/.test(location.pathname);
+
+  const isCompetition =
+    /^\/competitions\/none(?:\/|$)/.test(location.pathname);
 
   if (!isGame && !isCompetition) return;
 
-  const clean = x => String(x || '').replace(/\s+/g, ' ').trim();
-  const gameIdFromUrl = x => String(x || '').match(/gameid\/(\d+)/i)?.[1] || null;
-  const isAet = x => /^a\.?e\.?t\.?$/i.test(clean(x));
-  const isPens = x => /^(?:pens?|penalties)\s+\d+\s*[:\-]\s*\d+$/i.test(clean(x));
+  // ==========================================
+  // HELPERS
+  // ==========================================
+
+  const clean = value =>
+    String(value || '').replace(/\s+/g, ' ').trim();
+
+  const gameIdFromUrl = value =>
+    String(value || '').match(/gameid\/(\d+)/i)?.[1] || null;
+
+  const isAet = value =>
+    /^a\.?e\.?t\.?$/i.test(clean(value));
+
+  const isPens = value =>
+    /^(?:pens?|penalties)\s+\d+\s*[:\-]\s*\d+$/i
+      .test(clean(value));
 
   function getStatus(value) {
-    const s = clean(value).replace(/^MATCH\s*-\s*/i, '').toUpperCase();
-    if (s === 'LIVE' || s === 'HT') return s;
-    if (s === 'FT' || s === 'FINISHED') return 'FT';
-    if (/^HALF[\s.\-]?TIME$/.test(s)) return 'HT';
+    const status = clean(value)
+      .replace(/^MATCH\s*-\s*/i, '')
+      .toUpperCase();
+
+    if (status === 'LIVE' || status === 'HT') {
+      return status;
+    }
+
+    if (status === 'FT' || status === 'FINISHED') {
+      return 'FT';
+    }
+
+    if (/^HALF[\s.\-]?TIME$/.test(status)) {
+      return 'HT';
+    }
+
     return null;
   }
 
   function isTeamName(value) {
     const s = clean(value);
+
     return !!s &&
       !/^\d+\s*:\s*\d+$/.test(s) &&
       !/^\d{1,3}:\d{2}$/.test(s) &&
       !getStatus(s) &&
       !isAet(s) &&
       !isPens(s) &&
-      !/^(Formation|Line-Up|Substitutes|Statistics|Match Commentary|Match Timeline|HOME|CLUB|MANAGEMENT|TACTICS|TRAINING|COMMUNITY)$/i.test(s);
+      !/^(Formation|Line-Up|Substitutes|Statistics|Match Commentary|Match Timeline|HOME|CLUB|MANAGEMENT|TACTICS|TRAINING|COMMUNITY)$/i
+        .test(s);
   }
 
-  function readMatchMinute(lines, index, status) {
-    if (status !== 'LIVE') return null;
+  // ==========================================
+  // MATCH CLOCK - DESKTOP AND MOBILE
+  // ==========================================
 
-    for (let i = index + 3; i < Math.min(lines.length, index + 160); i++) {
-      if (/^Match Commentary$/i.test(lines[i])) break;
+  function parseClock(value) {
+    const text = clean(value);
 
-      const m = lines[i].match(/^(\d{1,3}):([0-5]\d)$/);
-      if (m && Number(m[1]) <= 130) {
-        return Number(m[1]);
+    // 67:25, [67:25], 67', 67 min
+    const match = text.match(
+      /^(?:\[)?(\d{1,3})(?::([0-5]\d)|['’′]|(?:\s*min(?:ute)?s?))\]?$/
+    );
+
+    if (!match) return null;
+
+    const minute = Number(match[1]);
+
+    if (!Number.isInteger(minute) || minute > 130) {
+      return null;
+    }
+
+    return minute;
+  }
+
+  function readMatchMinute(lines, scoreIndex, status) {
+    if (status !== 'LIVE') {
+      return { minute: null, approximate: false };
+    }
+
+    // 1. Search for the match clock in the
+    // visible match header and event area.
+    const end = Math.min(
+      lines.length,
+      scoreIndex + 180
+    );
+
+    for (let i = scoreIndex + 3; i < end; i++) {
+      const line = lines[i];
+
+      if (/^Match Commentary$/i.test(line)) {
+        break;
+      }
+
+      // Avoid timestamps in player substitutions.
+      const minute = parseClock(line);
+
+      if (minute !== null && line.includes(':')) {
+        return { minute, approximate: false };
       }
     }
 
-    return null;
+    // 2. Mobile fallback: latest commentary entry.
+    // This is the minute of the last event,
+    // not necessarily the exact current clock.
+    const text = document.body.innerText;
+    const commentaryAt = text.search(
+      /Match commentary/i
+    );
+
+    if (commentaryAt >= 0) {
+      const commentary = text.slice(
+        commentaryAt,
+        commentaryAt + 2500
+      );
+
+      const event = commentary.match(
+        /\[(\d{1,3}):([0-5]\d)\]/
+      );
+
+      if (event) {
+        const minute = Number(event[1]);
+
+        if (minute <= 130) {
+          return { minute, approximate: true };
+        }
+      }
+    }
+
+    return { minute: null, approximate: false };
   }
+
+  // ==========================================
+  // READ GAME
+  // ==========================================
 
   function readGame() {
     const id = gameIdFromUrl(location.pathname);
+
     if (!id) return null;
 
     const lines = document.body.innerText
@@ -76,11 +176,21 @@
       .map(clean)
       .filter(Boolean);
 
-    for (let i = 2; i < Math.min(lines.length - 1, 100); i++) {
-      const status = getStatus(lines[i - 1]);
-      const score = lines[i].match(/^(\d+)\s*:\s*(\d+)$/);
+    const limit = Math.min(
+      lines.length - 1,
+      120
+    );
 
-      if (!status || !score || !isTeamName(lines[i - 2])) {
+    for (let i = 2; i < limit; i++) {
+      const status = getStatus(lines[i - 1]);
+
+      if (!status) continue;
+
+      const score = lines[i].match(
+        /^(\d+)\s*:\s*(\d+)$/
+      );
+
+      if (!score || !isTeamName(lines[i - 2])) {
         continue;
       }
 
@@ -88,29 +198,47 @@
       let aet = false;
       let pens = null;
 
-      for (let j = i + 1; j < Math.min(lines.length, i + 10); j++) {
-        const v = lines[j];
+      for (
+        let j = i + 1;
+        j < Math.min(lines.length, i + 10);
+        j++
+      ) {
+        const value = lines[j];
 
-        if (isAet(v)) {
+        if (isAet(value)) {
           aet = true;
           continue;
         }
 
-        if (isPens(v)) {
-          const p = v.match(/(\d+)\s*[:\-]\s*(\d+)/);
-          pens = p ? `pens ${p[1]} : ${p[2]}` : null;
+        if (isPens(value)) {
+          const p = value.match(
+            /(\d+)\s*[:\-]\s*(\d+)/
+          );
+
+          pens = p
+            ? `pens ${p[1]} : ${p[2]}`
+            : null;
+
           continue;
         }
 
-        if (!away && isTeamName(v)) {
-          away = v;
+        if (!away && isTeamName(value)) {
+          away = value;
           continue;
         }
 
-        if (away && v === 'Formation') break;
+        if (away && value === 'Formation') {
+          break;
+        }
       }
 
       if (!away) continue;
+
+      const clock = readMatchMinute(
+        lines,
+        i,
+        status
+      );
 
       return {
         gameId: id,
@@ -119,7 +247,8 @@
         homeScore: Number(score[1]),
         awayScore: Number(score[2]),
         status,
-        minute: readMatchMinute(lines, i, status),
+        minute: clock.minute,
+        minuteApproximate: clock.approximate,
         aet,
         pens,
         url: location.href
@@ -128,6 +257,10 @@
 
     return null;
   }
+
+  // ==========================================
+  // GAME TAB PUBLISHER
+  // ==========================================
 
   function startGamePublisher() {
     let tabInfo = null;
@@ -138,6 +271,7 @@
       if (!tabInfo) return;
 
       const game = readGame();
+
       if (!game) return;
 
       const signature = JSON.stringify(game);
@@ -147,8 +281,10 @@
       }
 
       lastData = signature;
+
       tabInfo.dlsMatch = game;
       tabInfo.dlsUpdated = Date.now();
+
       GM_saveTab(tabInfo);
     }
 
@@ -159,9 +295,11 @@
 
     const observer = new MutationObserver(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        publish();
-      }, 300);
+
+      timer = setTimeout(
+        () => publish(),
+        300
+      );
     });
 
     observer.observe(document.body, {
@@ -170,15 +308,24 @@
       characterData: true
     });
 
-    setInterval(() => publish(true), HEARTBEAT_MS);
+    setInterval(
+      () => publish(true),
+      HEARTBEAT_MS
+    );
 
     window.addEventListener('pagehide', () => {
       if (!tabInfo) return;
+
       tabInfo.dlsMatch = null;
       tabInfo.dlsUpdated = 0;
+
       GM_saveTab(tabInfo);
     });
   }
+
+  // ==========================================
+  // COMPETITION VIEW
+  // ==========================================
 
   function startCompetitionView() {
     const matchStates = new Map();
@@ -187,7 +334,12 @@
 
     let refreshing = false;
 
+    // ========================================
+    // STYLES
+    // ========================================
+
     const style = document.createElement('style');
+
     style.textContent = `
       .dls-live-score {
         color: #188c43 !important;
@@ -195,6 +347,7 @@
       }
 
       /* LEAGUE */
+
       a.do-fixture-vs.dls-live-score,
       a.do-fixture-score.dls-live-score {
         display: inline-flex !important;
@@ -211,8 +364,8 @@
         min-width: 0 !important;
         padding: 0 !important;
         margin: 0 !important;
-        box-sizing: border-box;
         position: relative;
+        box-sizing: border-box;
       }
 
       .do-fixture-teams:has(.dls-live-score) {
@@ -220,6 +373,7 @@
       }
 
       /* CUP */
+
       .do-knockout-score:has(.dls-live-score) {
         display: flex !important;
         flex-direction: column !important;
@@ -230,6 +384,7 @@
       }
 
       /* SCORE */
+
       .dls-score-value {
         display: inline-flex;
         align-items: baseline;
@@ -244,8 +399,8 @@
         display: inline-block;
         min-width: .7em;
         text-align: center;
-        color: inherit;
         font: inherit;
+        color: inherit;
       }
 
       .dls-separator {
@@ -254,6 +409,7 @@
       }
 
       /* STATUS */
+
       .dls-status {
         display: block;
         font-size: 10px;
@@ -283,7 +439,8 @@
         pointer-events: none;
       }
 
-      /* GOAL OVERLAY */
+      /* DESKTOP GOAL OVERLAY */
+
       .dls-goal-marker {
         position: absolute !important;
         z-index: 10;
@@ -303,22 +460,32 @@
         box-sizing: border-box;
       }
 
-      /* League: centered slightly above result */
-      a.do-fixture-vs.dls-live-score > .dls-goal-marker,
-      a.do-fixture-score.dls-live-score > .dls-goal-marker {
+      a.do-fixture-vs.dls-live-score
+        > .dls-goal-marker,
+      a.do-fixture-score.dls-live-score
+        > .dls-goal-marker {
         left: 50%;
-        right: auto;
         top: -13px;
         transform: translateX(-50%);
       }
 
-      /* Cup: a bit higher than league so it does not touch score */
       .do-knockout-score > .dls-goal-marker {
         left: 50%;
-        right: auto;
         top: -17px;
         transform: translateX(-50%);
       }
+
+      /* MOBILE GOAL INDICATOR */
+
+      .dls-mobile-goal {
+        display: none;
+        color: #13873c;
+        font-size: 10px;
+        margin-right: 3px;
+        vertical-align: baseline;
+      }
+
+      /* PULSING DIGIT */
 
       @keyframes dls-digit-pulse {
         0%, 100% {
@@ -326,21 +493,60 @@
           transform: scale(1);
           text-shadow: none;
         }
+
         50% {
           color: #00c84b;
           transform: scale(1.35);
-          text-shadow: 0 0 7px rgba(0,190,65,.55);
+          text-shadow:
+            0 0 7px rgba(0,190,65,.55);
         }
       }
 
       .dls-digit-goal {
         color: #168f40 !important;
         font-weight: 900 !important;
-        animation: dls-digit-pulse 1.4s ease-in-out infinite;
+        animation:
+          dls-digit-pulse
+          1.4s ease-in-out infinite;
       }
 
       .dls-original-hidden {
         display: none !important;
+      }
+
+      /* MOBILE LAYOUT */
+
+      @media (max-width: 768px) {
+        /* No floating goal overlay on mobile */
+        .dls-goal-marker {
+          display: none !important;
+        }
+
+        .dls-mobile-goal {
+          display: inline;
+        }
+
+        .dls-status {
+          font-size: 10px;
+          line-height: 1.2;
+          white-space: nowrap;
+        }
+
+        .dls-score-value {
+          white-space: nowrap;
+        }
+
+        .dls-digit {
+          min-width: 0.65em;
+        }
+
+        /* Preserve normal fixture spacing */
+        a.do-fixture-vs.dls-live-score,
+        a.do-fixture-score.dls-live-score {
+          min-width: 0 !important;
+          max-width: 100%;
+          padding: 0 !important;
+        }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -350,15 +556,26 @@
         }
       }
     `;
+
     document.head.appendChild(style);
+
+    // ========================================
+    // FIND MATCH TARGETS
+    // ========================================
 
     function getTargets() {
       const targets = [];
 
+      // League
+
       for (const link of document.querySelectorAll(
-        '.do-fixture-item a.do-fixture-score[href*="gameid/"], .do-fixture-item a.do-fixture-vs[href*="gameid/"]'
+        '.do-fixture-item ' +
+        'a.do-fixture-score[href*="gameid/"], ' +
+        '.do-fixture-item ' +
+        'a.do-fixture-vs[href*="gameid/"]'
       )) {
         const id = gameIdFromUrl(link.href);
+
         if (!id) continue;
 
         targets.push({
@@ -370,13 +587,24 @@
         });
       }
 
+      // Cup
+
       for (const link of document.querySelectorAll(
-        '.do-knockout-match-inner a.do-match-stretch-link[href*="gameid/"]'
+        '.do-knockout-match-inner ' +
+        'a.do-match-stretch-link[href*="gameid/"]'
       )) {
         const id = gameIdFromUrl(link.href);
-        const row = link.closest('.do-knockout-match-inner');
-        const scoreElement = row?.querySelector('.do-knockout-result');
-        const noteParent = row?.querySelector('.do-knockout-score');
+        const row = link.closest(
+          '.do-knockout-match-inner'
+        );
+
+        const scoreElement = row?.querySelector(
+          '.do-knockout-result'
+        );
+
+        const noteParent = row?.querySelector(
+          '.do-knockout-score'
+        );
 
         if (id && scoreElement && noteParent) {
           targets.push({
@@ -392,8 +620,13 @@
       return targets;
     }
 
+    // ========================================
+    // ORIGINAL ELEMENTS
+    // ========================================
+
     function rememberOriginal(target) {
       const element = target.scoreElement;
+
       if (!originals.has(element)) {
         originals.set(element, {
           html: element.innerHTML,
@@ -404,15 +637,20 @@
 
     function isResultAnnotation(value) {
       const s = clean(value);
+
       return (
         /\ba\.?e\.?t\.?\b/i.test(s) ||
         /\bpens?\b/i.test(s) ||
-        /^\(?\d+\s*[-:]\s*\d+\s*(?:p|aet)\)?$/i.test(s)
+        /^\(?\d+\s*[-:]\s*\d+\s*(?:p|aet)\)?$/i
+          .test(s)
       );
     }
 
     function rememberCupAnnotations(target) {
-      if (target.type !== 'cup' || originalAnnotations.has(target.noteParent)) {
+      if (
+        target.type !== 'cup' ||
+        originalAnnotations.has(target.noteParent)
+      ) {
         return;
       }
 
@@ -420,17 +658,27 @@
       const nodes = [];
 
       for (const child of [...parent.childNodes]) {
-        if (child === target.scoreElement) continue;
+        if (child === target.scoreElement) {
+          continue;
+        }
 
         if (child.nodeType === Node.ELEMENT_NODE) {
-          if (child.dataset.dlsNote === '1' || child.contains(target.scoreElement)) {
+          if (
+            child.dataset.dlsNote === '1' ||
+            child.contains(target.scoreElement)
+          ) {
             continue;
           }
+
           if (isResultAnnotation(child.textContent)) {
             nodes.push(child);
           }
-        } else if (child.nodeType === Node.TEXT_NODE && isResultAnnotation(child.textContent)) {
+        } else if (
+          child.nodeType === Node.TEXT_NODE &&
+          isResultAnnotation(child.textContent)
+        ) {
           const span = document.createElement('span');
+
           span.textContent = child.textContent;
           parent.replaceChild(span, child);
           nodes.push(span);
@@ -440,21 +688,39 @@
       originalAnnotations.set(parent, nodes);
     }
 
-    function showOriginalAnnotations(target, visible) {
+    function showOriginalAnnotations(
+      target,
+      visible
+    ) {
       if (target.type !== 'cup') return;
 
       rememberCupAnnotations(target);
 
-      for (const node of originalAnnotations.get(target.noteParent) || []) {
-        node.classList.toggle('dls-original-hidden', !visible);
+      for (
+        const node of
+        originalAnnotations.get(target.noteParent) || []
+      ) {
+        node.classList.toggle(
+          'dls-original-hidden',
+          !visible
+        );
       }
     }
 
+    // ========================================
+    // NOTES
+    // ========================================
+
     function removeNotes(target) {
-      const parents = new Set([target.noteParent, target.goalParent].filter(Boolean));
+      const parents = new Set(
+        [target.noteParent, target.goalParent]
+          .filter(Boolean)
+      );
 
       for (const parent of parents) {
-        for (const node of parent.querySelectorAll('[data-dls-note="1"]')) {
+        for (const node of parent.querySelectorAll(
+          '[data-dls-note="1"]'
+        )) {
           if (node.parentElement === parent) {
             node.remove();
           }
@@ -464,27 +730,38 @@
 
     function note(parent, cls, text) {
       const node = document.createElement('span');
+
       node.dataset.dlsNote = '1';
       node.className = cls;
       node.textContent = text;
+
       parent.appendChild(node);
+
       return node;
     }
 
     function restoreTarget(target) {
       const element = target.scoreElement;
       const original = originals.get(element);
+
       if (!original) return;
 
       removeNotes(target);
 
-      if (element.className !== original.className || element.innerHTML !== original.html) {
+      if (
+        element.className !== original.className ||
+        element.innerHTML !== original.html
+      ) {
         element.innerHTML = original.html;
         element.className = original.className;
       }
 
       showOriginalAnnotations(target, true);
     }
+
+    // ========================================
+    // SCORE DIGITS
+    // ========================================
 
     function renderDigits(target, game, goalSide) {
       const score = target.scoreElement;
@@ -496,26 +773,37 @@
       home.className = 'dls-digit';
       home.textContent = game.homeScore;
 
-      const sep = document.createElement('span');
-      sep.className = 'dls-separator';
-      sep.textContent = ' - ';
+      const separator = document.createElement('span');
+      separator.className = 'dls-separator';
+      separator.textContent = ' - ';
 
       const away = document.createElement('span');
       away.className = 'dls-digit';
       away.textContent = game.awayScore;
 
-      if (goalSide === 'home' || goalSide === 'both') {
+      if (
+        goalSide === 'home' ||
+        goalSide === 'both'
+      ) {
         home.classList.add('dls-digit-goal');
       }
 
-      if (goalSide === 'away' || goalSide === 'both') {
+      if (
+        goalSide === 'away' ||
+        goalSide === 'both'
+      ) {
         away.classList.add('dls-digit-goal');
       }
 
-      wrapper.append(home, sep, away);
+      wrapper.append(home, separator, away);
+
       score.replaceChildren(wrapper);
       score.classList.add('dls-live-score');
     }
+
+    // ========================================
+    // DISPLAY MATCH
+    // ========================================
 
     function displayMatch(target, game, goalSide) {
       rememberOriginal(target);
@@ -529,27 +817,65 @@
 
       if (game.status === 'LIVE') {
         statusClass += ' dls-status-live';
+
         if (Number.isInteger(game.minute)) {
-          statusText = `LIVE · ${game.minute}'`;
+          const prefix = game.minuteApproximate
+            ? '~'
+            : '';
+
+          statusText =
+            `LIVE · ${prefix}${game.minute}'`;
         }
       } else if (game.status === 'HT') {
         statusClass += ' dls-status-ht';
       }
 
-      note(target.noteParent, statusClass, statusText);
+      const status = note(
+        target.noteParent,
+        statusClass,
+        statusText
+      );
+
+      // On mobile show a small goal icon inline
+      // with the match status, not as an overlay.
+      if (goalSide) {
+        const mobileGoal = document.createElement('span');
+
+        mobileGoal.className = 'dls-mobile-goal';
+        mobileGoal.textContent = '⚽';
+        mobileGoal.title = 'GOOOL!';
+
+        status.prepend(mobileGoal);
+      }
 
       if (game.aet) {
-        note(target.noteParent, 'dls-result-note', 'a.e.t.');
+        note(
+          target.noteParent,
+          'dls-result-note',
+          'a.e.t.'
+        );
       }
 
       if (game.pens) {
-        note(target.noteParent, 'dls-result-note', game.pens);
+        note(
+          target.noteParent,
+          'dls-result-note',
+          game.pens
+        );
       }
 
       if (goalSide && target.goalParent) {
-        note(target.goalParent, 'dls-goal-marker', '⚽ GOOOL!');
+        note(
+          target.goalParent,
+          'dls-goal-marker',
+          '⚽ GOOOL!'
+        );
       }
     }
+
+    // ========================================
+    // GET MATCHES
+    // ========================================
 
     function getLiveMatches(tabs) {
       const matches = new Map();
@@ -557,21 +883,34 @@
 
       for (const tab of Object.values(tabs || {})) {
         const game = tab.dlsMatch;
+
         if (!game?.gameId) continue;
 
-        const updated = Number(tab.dlsUpdated || 0);
-        if (now - updated > STALE_MS) continue;
+        const updated = Number(
+          tab.dlsUpdated || 0
+        );
+
+        if (now - updated > STALE_MS) {
+          continue;
+        }
 
         const id = String(game.gameId);
         const previous = matches.get(id);
 
-        if (!previous || updated > previous.updated) {
+        if (
+          !previous ||
+          updated > previous.updated
+        ) {
           matches.set(id, { game, updated });
         }
       }
 
       return matches;
     }
+
+    // ========================================
+    // GOAL DETECTION
+    // ========================================
 
     function updateGoalState(id, game, now) {
       const current = {
@@ -587,18 +926,25 @@
           goalUntil: 0,
           goalSide: null
         });
+
         return null;
       }
 
       let { goalUntil, goalSide } = previous;
-      const homeDiff = current.home - previous.home;
-      const awayDiff = current.away - previous.away;
+
+      const homeDiff =
+        current.home - previous.home;
+
+      const awayDiff =
+        current.away - previous.away;
 
       if (homeDiff > 0 || awayDiff > 0) {
         goalSide =
-          homeDiff > 0 && awayDiff === 0 ? 'home' :
-          awayDiff > 0 && homeDiff === 0 ? 'away' :
-          'both';
+          homeDiff > 0 && awayDiff === 0
+            ? 'home'
+            : awayDiff > 0 && homeDiff === 0
+              ? 'away'
+              : 'both';
 
         goalUntil = now + GOAL_MS;
       }
@@ -618,11 +964,18 @@
         goalSide
       });
 
-      return now < goalUntil ? goalSide : null;
+      return now < goalUntil
+        ? goalSide
+        : null;
     }
+
+    // ========================================
+    // REFRESH
+    // ========================================
 
     function refresh() {
       if (refreshing) return;
+
       refreshing = true;
 
       try {
@@ -644,29 +997,52 @@
               if (!goalStates.has(target.id)) {
                 goalStates.set(
                   target.id,
-                  updateGoalState(target.id, record.game, now)
+                  updateGoalState(
+                    target.id,
+                    record.game,
+                    now
+                  )
                 );
               }
 
-              displayMatch(target, record.game, goalStates.get(target.id));
+              displayMatch(
+                target,
+                record.game,
+                goalStates.get(target.id)
+              );
             }
           } catch (error) {
-            console.error('[Dugout Live Scores] Render error:', error);
+            console.error(
+              '[Dugout Live Scores] Render error:',
+              error
+            );
           } finally {
             refreshing = false;
           }
         });
       } catch (error) {
         refreshing = false;
-        console.error('[Dugout Live Scores] Read error:', error);
+
+        console.error(
+          '[Dugout Live Scores] Read error:',
+          error
+        );
       }
     }
 
     refresh();
+
     setInterval(refresh, REFRESH_MS);
 
-    console.info('[Dugout Live Scores] v0.4.6 active', location.pathname);
+    console.info(
+      '[Dugout Live Scores] v0.4.7 active',
+      location.pathname
+    );
   }
+
+  // ==========================================
+  // START
+  // ==========================================
 
   if (isGame) {
     startGamePublisher();
@@ -675,4 +1051,5 @@
   if (isCompetition) {
     startCompetitionView();
   }
+
 })();
