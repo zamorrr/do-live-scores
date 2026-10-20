@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dugout Live Scores Experimental
 // @namespace    dugout-live-scores-experimental
-// @version      0.4.10
+// @version      0.4.11
 // @description  Live scores on Dugout competition pages (no extra game requests)
 // @match        https://dugout-online.com/game/*
 // @match        https://www.dugout-online.com/game/*
@@ -77,55 +77,63 @@
   function setupFirefoxAndroidAudioExperiment() {
     if (!IS_ANDROID) return;
 
+    // Attach outside document.body: replay navigation may replace body contents.
+    // Shadow DOM isolates the panel from game CSS.
     const AudioContextType = window.AudioContext || window.webkitAudioContext;
-    const panel = document.createElement('div');
-    panel.id = 'dls-experimental-diagnostics';
-    Object.assign(panel.style, {
-      position: 'fixed', bottom: '16px', right: '12px',
-      zIndex: '2147483647', display: 'flex', flexDirection: 'column',
-      alignItems: 'stretch', gap: '4px', padding: '7px',
-      border: '2px solid #188c43', borderRadius: '8px',
-      background: '#ecfff0', color: '#126e32',
-      font: 'bold 12px/1.4 sans-serif', maxWidth: '225px',
-      boxShadow: '0 2px 10px rgba(0,0,0,.25)'
-    });
-    const details = document.createElement('span');
+    const host = document.createElement('div');
+    host.id = 'dls-exp-diagnostics-host';
+    host.style.cssText = 'position:fixed!important;right:12px!important;bottom:16px!important;z-index:2147483647!important;display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;';
+    const root = host.attachShadow ? host.attachShadow({mode:'open'}) : host;
+    const panel = document.createElement('section');
+    panel.style.cssText = 'display:flex;flex-direction:column;gap:5px;max-width:230px;padding:9px;border:2px solid #188c43;border-radius:8px;background:#ecfff0;color:#126e32;font:bold 12px/1.4 sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);';
+    const details = document.createElement('div');
     details.textContent = !IS_FIREFOX_ANDROID
-      ? 'DLS EXP 0.4.10 | Android: Firefox niewykryty'
+      ? 'DLS EXP 0.4.11 | Firefox niewykryty'
       : !AudioContextType
-        ? 'DLS EXP 0.4.10 | brak Web Audio API'
-        : 'DLS EXP 0.4.10 | gotowy';
+        ? 'DLS EXP 0.4.11 | brak Web Audio'
+        : 'DLS EXP 0.4.11 | gotowy';
     panel.appendChild(details);
-
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = 'DLS: aktywuj tryb tła';
-    Object.assign(button.style, {
-      appearance: 'auto', display: 'block', padding: '8px',
-      border: '1px solid #188c43', borderRadius: '5px',
-      background: '#fff', color: '#126e32',
-      font: 'bold 12px sans-serif', cursor: 'pointer'
-    });
+    button.style.cssText = 'display:block;appearance:auto;padding:8px;border:1px solid #188c43;border-radius:5px;background:#fff;color:#126e32;font:bold 12px sans-serif;cursor:pointer;';
     button.disabled = !IS_FIREFOX_ANDROID || !AudioContextType;
     panel.appendChild(button);
-    document.body.appendChild(panel);
+    root.appendChild(panel);
 
+    const attach = () => {
+      const container = document.documentElement || document.body;
+      if (container && host.parentNode !== container) container.appendChild(host);
+    };
+    attach();
+    // Repair the panel after Dugout rewrites the game DOM.
+    const panelObserver = new MutationObserver(() => {
+      if (!host.isConnected) attach();
+    });
+    panelObserver.observe(document, {childList:true});
+    if (document.documentElement) {
+      panelObserver.observe(document.documentElement, {childList:true});
+    }
+    const reattachTimer = setInterval(attach, 1000);
+
+    const report = (value) => {
+      details.textContent = 'DLS EXP 0.4.11 | ' + value;
+      console.info('[DLS EXP]', value);
+    };
     if (!IS_FIREFOX_ANDROID || !AudioContextType) {
-      console.warn('[DLS EXP] Audio unavailable or Firefox Android not identified.', navigator.userAgent);
+      console.warn('[DLS EXP] Unsupported environment:', navigator.userAgent);
       return;
     }
 
-    let context = null, oscillator = null;
+    let context = null;
+    let oscillator = null;
     function updateLabel() {
       if (!context) return;
-      const state = context.state;
-      details.textContent = `DLS EXP 0.4.10 | audio: ${state}`;
-      button.textContent = state === 'running'
+      report('audio: ' + context.state);
+      button.textContent = context.state === 'running'
         ? 'DLS: audio aktywne (cisza)'
         : 'DLS: wznów audio';
-      console.info('[DLS EXP] AudioContext:', state);
     }
-
     button.addEventListener('click', async () => {
       try {
         if (!context) {
@@ -141,13 +149,14 @@
         await context.resume();
         updateLabel();
       } catch (error) {
-        details.textContent = 'DLS EXP 0.4.10 | błąd audio';
+        report('błąd audio: ' + (error?.name || 'unknown'));
         button.textContent = 'DLS: spróbuj ponownie';
-        console.error('[DLS EXP] Web Audio error:', error);
+        console.error('[DLS EXP] Audio failure:', error);
       }
     });
-
     window.addEventListener('pagehide', () => {
+      clearInterval(reattachTimer);
+      panelObserver.disconnect();
       try { oscillator?.stop(); } catch (_) {}
       if (context) context.close().catch(() => {});
     });
@@ -200,7 +209,7 @@
       clearTimeout(timer);
       timer = setTimeout(() => publish(), 300);
     });
-    observer.observe(document.body, {subtree:true, childList:true, characterData:true});
+    observer.observe(document.documentElement, {subtree:true, childList:true, characterData:true});
     setInterval(() => publish(true), HEARTBEAT_MS);
     window.addEventListener('pagehide', () => {
       if (!tabInfo) return;
@@ -452,7 +461,7 @@
     }
     refresh();
     setInterval(refresh, REFRESH_MS);
-    console.info('[Dugout Live Scores] v0.4.10 Experimental active', location.pathname);
+    console.info('[Dugout Live Scores] v0.4.11 Experimental active', location.pathname);
   }
 
   if (isGame) startGamePublisher();
