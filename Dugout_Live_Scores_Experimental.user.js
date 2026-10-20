@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dugout Live Scores Experimental
 // @namespace    dugout-live-scores-experimental
-// @version      0.4.9
+// @version      0.4.10
 // @description  Live scores on Dugout competition pages (no extra game requests)
 // @match        https://dugout-online.com/game/*
 // @match        https://www.dugout-online.com/game/*
@@ -23,7 +23,7 @@
   const GOAL_MS = 60000;
   const REFRESH_MS = 2000;
   const HEARTBEAT_MS = 5000;
-  const isGame = /\/game\/.*gameid\/\d+/.test(location.pathname);
+  const isGame = /^\/game\//.test(location.pathname);
   const isCompetition = /^\/competitions\/none(?:\/|$)/.test(location.pathname);
   if (!isGame && !isCompetition) return;
 
@@ -67,58 +67,86 @@
     return null;
   }
 
-  // Experimental, match-page-only workaround for Firefox on Android.
-  // A connected zero-gain oscillator emits no audible sound. Some browser
-  // versions may still throttle or suspend the context in background tabs.
-  const IS_FIREFOX_ANDROID = /Android/i.test(navigator.userAgent) &&
-    /Firefox\/\d+/i.test(navigator.userAgent);
+  // Experimental diagnostics and silent Web Audio for Firefox on Android.
+  // Show diagnostics on Android even if browser detection or audio support fails.
+  const IS_ANDROID = /Android/i.test(navigator.userAgent);
+  const IS_FIREFOX_ANDROID = IS_ANDROID &&
+    /(?:Firefox|Fennec|IceRaven)\/\d+|Gecko\/\d+/i.test(navigator.userAgent) &&
+    !/(?:Chrome|Chromium|EdgA|OPR|SamsungBrowser)\//i.test(navigator.userAgent);
 
   function setupFirefoxAndroidAudioExperiment() {
-    if (!IS_FIREFOX_ANDROID) return;
+    if (!IS_ANDROID) return;
+
     const AudioContextType = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextType) {
-      console.info('[Dugout Live Scores] AudioContext not supported');
-      return;
-    }
-    let context = null, oscillator = null, gain = null;
+    const panel = document.createElement('div');
+    panel.id = 'dls-experimental-diagnostics';
+    Object.assign(panel.style, {
+      position: 'fixed', bottom: '16px', right: '12px',
+      zIndex: '2147483647', display: 'flex', flexDirection: 'column',
+      alignItems: 'stretch', gap: '4px', padding: '7px',
+      border: '2px solid #188c43', borderRadius: '8px',
+      background: '#ecfff0', color: '#126e32',
+      font: 'bold 12px/1.4 sans-serif', maxWidth: '225px',
+      boxShadow: '0 2px 10px rgba(0,0,0,.25)'
+    });
+    const details = document.createElement('span');
+    details.textContent = !IS_FIREFOX_ANDROID
+      ? 'DLS EXP 0.4.10 | Android: Firefox niewykryty'
+      : !AudioContextType
+        ? 'DLS EXP 0.4.10 | brak Web Audio API'
+        : 'DLS EXP 0.4.10 | gotowy';
+    panel.appendChild(details);
+
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = 'DLS: aktywuj tryb tła';
-    button.title = 'Eksperymentalne bezgłośne Web Audio dla Firefox Android';
     Object.assign(button.style, {
-      position: 'fixed', bottom: '12px', right: '12px', zIndex: '2147483646',
-      border: '1px solid #188c43', borderRadius: '6px', padding: '8px 10px',
-      background: '#ecfff0', color: '#126e32', fontSize: '12px',
-      fontWeight: 'bold', cursor: 'pointer'
+      appearance: 'auto', display: 'block', padding: '8px',
+      border: '1px solid #188c43', borderRadius: '5px',
+      background: '#fff', color: '#126e32',
+      font: 'bold 12px sans-serif', cursor: 'pointer'
     });
-    document.body.appendChild(button);
+    button.disabled = !IS_FIREFOX_ANDROID || !AudioContextType;
+    panel.appendChild(button);
+    document.body.appendChild(panel);
 
-    const updateLabel = () => {
+    if (!IS_FIREFOX_ANDROID || !AudioContextType) {
+      console.warn('[DLS EXP] Audio unavailable or Firefox Android not identified.', navigator.userAgent);
+      return;
+    }
+
+    let context = null, oscillator = null;
+    function updateLabel() {
       if (!context) return;
-      button.textContent = context.state === 'running'
-        ? 'DLS: audio aktywne (bez dźwięku)'
-        : 'DLS: dotknij, aby wznowić audio';
-      console.info('[Dugout Live Scores] AudioContext:', context.state);
-    };
+      const state = context.state;
+      details.textContent = `DLS EXP 0.4.10 | audio: ${state}`;
+      button.textContent = state === 'running'
+        ? 'DLS: audio aktywne (cisza)'
+        : 'DLS: wznów audio';
+      console.info('[DLS EXP] AudioContext:', state);
+    }
+
     button.addEventListener('click', async () => {
       try {
         if (!context) {
           context = new AudioContextType();
           oscillator = context.createOscillator();
-          gain = context.createGain();
+          const gain = context.createGain();
           gain.gain.value = 0;
           oscillator.connect(gain);
           gain.connect(context.destination);
           oscillator.start();
           context.addEventListener('statechange', updateLabel);
         }
-        await context.resume(); // User gesture for Firefox autoplay policy.
+        await context.resume();
         updateLabel();
       } catch (error) {
-        button.textContent = 'DLS: błąd audio (sprawdź konsolę)';
-        console.warn('[Dugout Live Scores] Silent audio experiment failed:', error);
+        details.textContent = 'DLS EXP 0.4.10 | błąd audio';
+        button.textContent = 'DLS: spróbuj ponownie';
+        console.error('[DLS EXP] Web Audio error:', error);
       }
     });
+
     window.addEventListener('pagehide', () => {
       try { oscillator?.stop(); } catch (_) {}
       if (context) context.close().catch(() => {});
@@ -154,6 +182,7 @@
   }
 
   function startGamePublisher() {
+    setupFirefoxAndroidAudioExperiment();
     let tabInfo = null, timer = null, lastData = '';
     function publish(force = false) {
       if (!tabInfo) return;
@@ -166,7 +195,6 @@
       tabInfo.dlsUpdated = Date.now();
       GM_saveTab(tabInfo);
     }
-    setupFirefoxAndroidAudioExperiment();
     GM_getTab(tab => { tabInfo = tab; publish(true); });
     const observer = new MutationObserver(() => {
       clearTimeout(timer);
@@ -424,7 +452,7 @@
     }
     refresh();
     setInterval(refresh, REFRESH_MS);
-    console.info('[Dugout Live Scores] v0.4.9 Experimental active', location.pathname);
+    console.info('[Dugout Live Scores] v0.4.10 Experimental active', location.pathname);
   }
 
   if (isGame) startGamePublisher();
